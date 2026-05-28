@@ -11,7 +11,12 @@ venv/
 .vscode/
 .idea/
 *.swp
+*.swo
 
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# Testing
+.mcp-inspector/
