@@ -1,6 +1,6 @@
 [project]
 name = "oracle-fusion-docs-mcp"
-version = "2.0.0"
+version = "2.1.0"
 description = "MCP server for instant search across Oracle Fusion Cloud documentation (HCM, ERP, EPM, SCM, CX, Projects). 300+ topics. Zero maintenance. Always up-to-date."
 readme = "README.md"
 license = {text = "MIT"}
