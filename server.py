@@ -11,7 +11,11 @@ JavaScript-heavy documentation pages into clean markdown.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import os
+from pathlib import Path
 import sys
 import time
 from typing import Optional
@@ -37,51 +41,253 @@ logger = logging.getLogger(__name__)
 # ── Caching ──────────────────────────────────────────────────
 
 class ResponseCache:
-    """Lightweight in-memory LRU cache with time-to-live (TTL) expiration."""
-    def __init__(self, max_size: int = 50, ttl_seconds: int = 3600):
+    """Lightweight in-memory LRU cache with time-to-live (TTL) expiration,
+    backed by a persistent disk cache at ~/.cache/oracle-fusion-docs/.
+    """
+    def __init__(self, max_size: int = 50, ttl_seconds: int = 3600, disk_ttl_seconds: int = 86400, max_disk_entries: int = 200):
         self.max_size = max_size
         self.ttl_seconds = ttl_seconds
+        self.disk_ttl_seconds = disk_ttl_seconds
+        self.max_disk_entries = max_disk_entries
         # Maps URL -> (content_string, expiration_timestamp)
         self.cache: dict[str, tuple[str, float]] = {}
         self.hits = 0
         self.misses = 0
+        
+        # Disk cache directory setup
+        try:
+            self.cache_dir = Path.home() / ".cache" / "oracle-fusion-docs"
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            self.disk_enabled = True
+        except Exception as e:
+            logger.warning(
+                "Failed to initialize persistent disk cache directory: %s. "
+                "Falling back to in-memory caching only.",
+                e
+            )
+            self.disk_enabled = False
 
-    def get(self, url: str) -> str | None:
-        if url in self.cache:
-            content, expires_at = self.cache[url]
-            if time.time() < expires_at:
-                self.hits += 1
-                # Move to end to maintain LRU order in Python 3.7+ dict
-                self.cache.pop(url)
-                self.cache[url] = (content, expires_at)
-                return content
-            else:
-                # Expired
-                self.cache.pop(url)
-        self.misses += 1
-        return None
+        # Load valid entries from disk to warm in-memory cache on startup
+        if self.disk_enabled:
+            self._warm_cache_from_disk()
 
-    def set(self, url: str, content: str) -> None:
+    def _warm_cache_from_disk(self) -> None:
+        """Scan persistent cache directory and load unexpired entries into memory."""
+        try:
+            now = time.time()
+            expired_entries = 0
+            corrupt_entries = 0
+            
+            # 1. Clean expired and corrupt files from disk
+            for p in self.cache_dir.glob("*.json"):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    
+                    timestamp = data["timestamp"]
+                    ttl = data.get("ttl", self.disk_ttl_seconds)
+                    
+                    if now >= timestamp + ttl:
+                        expired_entries += 1
+                        try:
+                            p.unlink()
+                        except Exception:
+                            pass
+                except Exception:
+                    corrupt_entries += 1
+                    try:
+                        p.unlink()
+                    except Exception:
+                        pass
+
+            # 2. Collect remaining valid files sorted by modification time descending
+            valid_files = []
+            for p in self.cache_dir.glob("*.json"):
+                try:
+                    mtime = p.stat().st_mtime
+                    valid_files.append((p, mtime))
+                except Exception:
+                    pass
+            
+            valid_files.sort(key=lambda x: x[1], reverse=True)
+
+            # 3. Load up to `max_size` newest entries into memory
+            loaded_entries = 0
+            for p, _ in reversed(valid_files[:self.max_size]):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    url = data["url"]
+                    content = data["content"]
+                    timestamp = data["timestamp"]
+                    ttl = data.get("ttl", self.disk_ttl_seconds)
+                    
+                    remaining_disk_ttl = (timestamp + ttl) - now
+                    if remaining_disk_ttl > 0:
+                        in_memory_ttl = min(self.ttl_seconds, remaining_disk_ttl)
+                        expires_at = now + in_memory_ttl
+                        self.cache[url] = (content, expires_at)
+                        loaded_entries += 1
+                except Exception:
+                    pass
+
+            if loaded_entries > 0 or expired_entries > 0 or corrupt_entries > 0:
+                logger.info(
+                    "Warmed cache from disk: loaded %d valid entries. "
+                    "Cleaned %d expired and %d corrupt entries on disk.",
+                    loaded_entries,
+                    expired_entries,
+                    corrupt_entries
+                )
+        except Exception as e:
+            logger.warning("Error during warming cache from disk: %s", e)
+
+    def _save_to_disk(self, url: str, content: str) -> None:
+        """Persist a cache entry to disk and enforce the 200-file limit."""
+        if not self.disk_enabled:
+            return
+
+        try:
+            filename = hashlib.md5(url.encode("utf-8")).hexdigest() + ".json"
+            filepath = self.cache_dir / filename
+            
+            # Enforce max disk entries (200) by evicting oldest by mtime
+            if not filepath.exists():
+                disk_files = list(self.cache_dir.glob("*.json"))
+                if len(disk_files) >= self.max_disk_entries:
+                    files_with_mtime = []
+                    for p in disk_files:
+                        try:
+                            files_with_mtime.append((p, p.stat().st_mtime))
+                        except Exception:
+                            pass
+                    
+                    if files_with_mtime:
+                        files_with_mtime.sort(key=lambda x: x[1])
+                        oldest_path = files_with_mtime[0][0]
+                        try:
+                            oldest_path.unlink()
+                            logger.info("Evicted oldest disk cache entry: %s", oldest_path.name)
+                        except Exception as e:
+                            logger.warning(
+                                "Failed to evict oldest disk cache entry %s: %s",
+                                oldest_path.name,
+                                e
+                            )
+
+            # Save the entry
+            data = {
+                "url": url,
+                "content": content,
+                "timestamp": time.time(),
+                "ttl": self.disk_ttl_seconds
+            }
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning("Failed to save entry to disk cache for URL %s: %s", url, e)
+
+    def _set_memory(self, url: str, content: str, expires_at: float) -> None:
+        """Helper to write to in-memory cache with LRU eviction."""
         if url in self.cache:
             self.cache.pop(url)
         
         if len(self.cache) >= self.max_size:
-            # Remove the oldest item (first item in dictionary)
             oldest_key = next(iter(self.cache))
             self.cache.pop(oldest_key)
             
-        expires_at = time.time() + self.ttl_seconds
         self.cache[url] = (content, expires_at)
+
+    def get(self, url: str) -> str | None:
+        """Retrieve from in-memory cache or persistent disk cache."""
+        now = time.time()
+
+        # 1. Check in-memory cache
+        if url in self.cache:
+            content, expires_at = self.cache[url]
+            if now < expires_at:
+                self.hits += 1
+                # Move to end to maintain LRU order in memory
+                self.cache.pop(url)
+                self.cache[url] = (content, expires_at)
+                return content
+            else:
+                self.cache.pop(url)
+
+        # 2. Check disk cache
+        if self.disk_enabled:
+            filename = hashlib.md5(url.encode("utf-8")).hexdigest() + ".json"
+            filepath = self.cache_dir / filename
+            if filepath.exists():
+                try:
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    
+                    url_on_disk = data["url"]
+                    content = data["content"]
+                    timestamp = data["timestamp"]
+                    ttl = data.get("ttl", self.disk_ttl_seconds)
+                    
+                    if now < timestamp + ttl:
+                        # Valid disk entry! Load into memory
+                        remaining_disk_ttl = (timestamp + ttl) - now
+                        in_memory_ttl = min(self.ttl_seconds, remaining_disk_ttl)
+                        expires_at = now + in_memory_ttl
+                        self._set_memory(url, content, expires_at)
+                        
+                        self.hits += 1
+                        logger.info("fetch_oracle_page: disk cache HIT for URL: %s", url)
+                        return content
+                    else:
+                        # Expired on disk
+                        try:
+                            filepath.unlink()
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.debug("Failed to read disk cache file %s: %s", filepath.name, e)
+
+        self.misses += 1
+        return None
+
+    def set(self, url: str, content: str) -> None:
+        """Write-through: store in memory and on disk."""
+        # 1. Store in memory (1 hour TTL)
+        expires_at = time.time() + self.ttl_seconds
+        self._set_memory(url, content, expires_at)
+        
+        # 2. Store on disk (24 hour TTL)
+        self._save_to_disk(url, content)
+
+    def get_disk_stats(self) -> tuple[int, float]:
+        """Return (number of files on disk, total size of files on disk in KB)."""
+        if not self.disk_enabled:
+            return 0, 0.0
+        try:
+            count = 0
+            total_bytes = 0
+            for p in self.cache_dir.glob("*.json"):
+                try:
+                    count += 1
+                    total_bytes += p.stat().st_size
+                except Exception:
+                    pass
+            return count, total_bytes / 1024.0
+        except Exception:
+            return 0, 0.0
 
     def get_stats(self) -> dict[str, int | float]:
         total = self.hits + self.misses
         ratio = (self.hits / total) if total > 0 else 0.0
+        disk_count, disk_size_kb = self.get_disk_stats()
         return {
             "hits": self.hits,
             "misses": self.misses,
             "total_requests": total,
             "hit_ratio": ratio,
-            "size": len(self.cache)
+            "size": len(self.cache),
+            "disk_count": disk_count,
+            "disk_size_kb": disk_size_kb,
         }
 
 _page_cache = ResponseCache(max_size=50, ttl_seconds=3600)
@@ -90,12 +296,15 @@ def _cache_stats() -> None:
     """Log cache hit/miss ratio and statistics at INFO level."""
     stats = _page_cache.get_stats()
     logger.info(
-        "Cache Statistics: Hits: %d, Misses: %d, Hit Ratio: %.2f%%, Active Entries: %d/%d",
+        "Cache Statistics: Hits: %d, Misses: %d, Hit Ratio: %.2f%%, "
+        "Active Entries: %d/%d (Disk: %d entries, %.2f KB)",
         stats["hits"],
         stats["misses"],
         stats["hit_ratio"] * 100,
         stats["size"],
-        _page_cache.max_size
+        _page_cache.max_size,
+        stats["disk_count"],
+        stats["disk_size_kb"]
     )
 
 # ── Retry with Exponential Backoff ──────────────────────────
