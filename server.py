@@ -11,13 +11,16 @@ JavaScript-heavy documentation pages into clean markdown.
 
 from __future__ import annotations
 
+import logging
 import sys
+import time
 from typing import Optional
 from urllib.parse import quote
 
 import httpx
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
 
 # ── Config ───────────────────────────────────────────────────
 
@@ -27,6 +30,114 @@ MAX_PAGE_CHARS = 15_000
 JINA_READER_URL = "https://r.jina.ai/"
 REQUEST_TIMEOUT = 25.0
 _user_agent = "OracleDocsMCP/2.0"
+
+# Logger setup (MCP hosts capture standard error for logging)
+logger = logging.getLogger(__name__)
+
+# ── Caching ──────────────────────────────────────────────────
+
+class ResponseCache:
+    """Lightweight in-memory LRU cache with time-to-live (TTL) expiration."""
+    def __init__(self, max_size: int = 50, ttl_seconds: int = 3600):
+        self.max_size = max_size
+        self.ttl_seconds = ttl_seconds
+        # Maps URL -> (content_string, expiration_timestamp)
+        self.cache: dict[str, tuple[str, float]] = {}
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, url: str) -> str | None:
+        if url in self.cache:
+            content, expires_at = self.cache[url]
+            if time.time() < expires_at:
+                self.hits += 1
+                # Move to end to maintain LRU order in Python 3.7+ dict
+                self.cache.pop(url)
+                self.cache[url] = (content, expires_at)
+                return content
+            else:
+                # Expired
+                self.cache.pop(url)
+        self.misses += 1
+        return None
+
+    def set(self, url: str, content: str) -> None:
+        if url in self.cache:
+            self.cache.pop(url)
+        
+        if len(self.cache) >= self.max_size:
+            # Remove the oldest item (first item in dictionary)
+            oldest_key = next(iter(self.cache))
+            self.cache.pop(oldest_key)
+            
+        expires_at = time.time() + self.ttl_seconds
+        self.cache[url] = (content, expires_at)
+
+    def get_stats(self) -> dict[str, int | float]:
+        total = self.hits + self.misses
+        ratio = (self.hits / total) if total > 0 else 0.0
+        return {
+            "hits": self.hits,
+            "misses": self.misses,
+            "total_requests": total,
+            "hit_ratio": ratio,
+            "size": len(self.cache)
+        }
+
+_page_cache = ResponseCache(max_size=50, ttl_seconds=3600)
+
+def _cache_stats() -> None:
+    """Log cache hit/miss ratio and statistics at INFO level."""
+    stats = _page_cache.get_stats()
+    logger.info(
+        "Cache Statistics: Hits: %d, Misses: %d, Hit Ratio: %.2f%%, Active Entries: %d/%d",
+        stats["hits"],
+        stats["misses"],
+        stats["hit_ratio"] * 100,
+        stats["size"],
+        _page_cache.max_size
+    )
+
+# ── Retry with Exponential Backoff ──────────────────────────
+
+def _should_retry(exception: Exception) -> bool:
+    """Predicate function to determine if an exception warrants a retry."""
+    if isinstance(exception, (httpx.TimeoutException, httpx.NetworkError)):
+        return True
+    if isinstance(exception, httpx.HTTPStatusError):
+        return exception.response.status_code == 429
+    return False
+
+def _log_retry_attempt(retry_state) -> None:
+    """Log retry details at WARNING level."""
+    exc = retry_state.outcome.exception()
+    next_action = f"waiting {retry_state.next_action.sleep:.1f}s before next attempt" if retry_state.next_action else "no more retries"
+    url = retry_state.args[0] if retry_state.args else "unknown URL"
+    logger.warning(
+        "Retry attempt %d failed for URL %s: %s. %s.",
+        retry_state.attempt_number,
+        url,
+        f"{type(exc).__name__}: {exc}" if exc else "No exception",
+        next_action
+    )
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=2, max=8),
+    retry=retry_if_exception(_should_retry),
+    before_sleep=_log_retry_attempt,
+    reraise=True
+)
+async def _jina_get(url: str) -> httpx.Response:
+    """Fetch URL via Jina Reader proxy with retry logic."""
+    async with httpx.AsyncClient(
+        timeout=REQUEST_TIMEOUT,
+        follow_redirects=True,
+        headers={"Accept": "text/markdown", "User-Agent": _user_agent},
+    ) as client:
+        resp = await client.get(f"{JINA_READER_URL}{url}")
+        resp.raise_for_status()
+        return resp
 
 
 # ── Pydantic Models ─────────────────────────────────────────
@@ -585,6 +696,7 @@ async def search_oracle_docs(params: SearchInput) -> str:
         Markdown-formatted list of matching documentation pages,
         module index links, and direct search URLs for Oracle Help Center.
     """
+    logger.info("search_oracle_docs: query='%s', max_results=%d", params.query, params.max_results)
     index_matches = _search_topic_index(query=params.query, limit=params.max_results)
 
     google_url = (
@@ -596,12 +708,14 @@ async def search_oracle_docs(params: SearchInput) -> str:
     lines: list[str] = [f"## Search: *{params.query}*\n"]
 
     if index_matches:
+        logger.info("search_oracle_docs: found %d matches in topic index", len(index_matches))
         lines.append("### 📚 Matching Documentation Pages\n")
         for i, (keyword, url, match_type) in enumerate(index_matches, 1):
             tag = "🎯" if match_type == "exact" else "🔍"
             lines.append(f"**{i}. [{keyword.title()}]({url})** {tag}")
         lines.append("")
     else:
+        logger.warning("search_oracle_docs: empty results (no matches found) for query '%s'", params.query)
         lines.append("### 🔍 No exact match in the topic index.\n")
 
     lines.append("### 📂 Oracle Fusion Module Indexes\n")
@@ -640,38 +754,75 @@ async def fetch_oracle_page(params: FetchInput) -> str:
         Clean markdown text truncated to ~15,000 characters.
     """
     url = params.url.strip()
+    logger.info("fetch_oracle_page: called with URL: %s", url)
+
     if "docs.oracle.com" not in url:
-        return "Error: URL must be under docs.oracle.com"
+        logger.warning("fetch_oracle_page: invalid URL domain requested: %s", url)
+        return "Error: URL must be under docs.oracle.com. Please specify a valid Oracle documentation URL."
     if not url.startswith("http"):
         url = "https://" + url
 
-    try:
-        async with httpx.AsyncClient(
-            timeout=REQUEST_TIMEOUT,
-            follow_redirects=True,
-            headers={"Accept": "text/markdown", "User-Agent": _user_agent},
-        ) as client:
-            resp = await client.get(f"{JINA_READER_URL}{url}")
-            resp.raise_for_status()
-    except httpx.TimeoutException:
-        return f"Error: Request timed out after {REQUEST_TIMEOUT}s. Try again or use a more specific URL."
-    except httpx.HTTPStatusError as e:
-        return f"Error: HTTP {e.response.status_code}. The page may be inaccessible or rate-limited."
-    except httpx.RequestError as e:
-        return f"Error: Network request failed — {type(e).__name__}: {e}"
+    # Cache lookup
+    cached_content = _page_cache.get(url)
+    if cached_content is not None:
+        logger.info("fetch_oracle_page: cache HIT for URL: %s", url)
+        _cache_stats()
+        return cached_content
 
-    text = _strip_jina_header(resp.text)
+    logger.info("fetch_oracle_page: cache MISS for URL: %s", url)
+
+    try:
+        resp = await _jina_get(url)
+        resp_text = resp.text
+    except httpx.TimeoutException as e:
+        err_msg = f"Error: Request to Jina Reader timed out after 3 attempts. Try again or check the URL directly: {url}"
+        logger.error("fetch_oracle_page: timeout fetching URL %s: %s", url, str(e))
+        return err_msg
+    except httpx.HTTPStatusError as e:
+        status_code = e.response.status_code
+        if status_code == 429:
+            err_msg = f"Error: Rate limit exceeded (HTTP 429) after 3 attempts. Jina Reader is currently rate-limiting requests. Please wait a minute and try again."
+        else:
+            err_msg = f"Error: HTTP {status_code} returned. The page may be inaccessible, deleted, or requires login. Verify the URL: {url}"
+        logger.error("fetch_oracle_page: HTTP %d fetching URL %s: %s", status_code, url, str(e))
+        return err_msg
+    except httpx.NetworkError as e:
+        err_msg = f"Error: Network connection failed after 3 attempts. Check your internet connection and verify if Jina Reader (https://r.jina.ai/) is reachable."
+        logger.error("fetch_oracle_page: Network error fetching URL %s: %s", url, str(e))
+        return err_msg
+    except Exception as e:
+        err_msg = f"Error: Unexpected network failure — {type(e).__name__}: {e}. Please ensure Jina Reader is available and try again."
+        logger.error("fetch_oracle_page: unexpected failure fetching URL %s: %s", url, str(e))
+        return err_msg
+
+    text = _strip_jina_header(resp_text)
     result = _collapse_blanks(text)
 
+    is_truncated = False
     if len(result) > MAX_PAGE_CHARS:
         result = result[:MAX_PAGE_CHARS] + "\n\n[... truncated — content exceeds 15K chars]"
+        is_truncated = True
 
     if len(result.strip()) < 50:
+        logger.warning(
+            "fetch_oracle_page: empty or very short content extracted (%d chars) for URL: %s",
+            len(result), url
+        )
         return (
             f"Warning: Very little content extracted ({len(result)} chars). "
-            "The page may be JavaScript-rendered or inaccessible."
+            "The page may be JavaScript-rendered, require login, or be inaccessible. "
+            f"Check the URL directly: {url}"
         )
 
+    # Cache successful result
+    _page_cache.set(url, result)
+
+    if is_truncated:
+        logger.warning("fetch_oracle_page: truncated content fetched for URL %s (%d chars)", url, len(result))
+    else:
+        logger.info("fetch_oracle_page: successfully fetched URL %s (%d chars)", url, len(result))
+
+    _cache_stats()
     return result
 
 
@@ -693,6 +844,7 @@ async def list_modules() -> str:
 
     Use this to discover what modules are available before searching.
     """
+    logger.info("list_modules: called")
     lines: list[str] = ["## Oracle Fusion Cloud Modules\n"]
     for i, (name, url) in enumerate(FUSION_MODULE_PAGES, 1):
         lines.append(f"{i}. **[{name}]({url})**")

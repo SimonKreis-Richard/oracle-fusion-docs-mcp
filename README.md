@@ -90,13 +90,16 @@ This MCP server solves that:
 ```
 ┌──────────────────┐     ┌───────────────────────┐     ┌──────────────────────┐
 │  AI Agent / IDE  │────▶│  MCP Server           │────▶│  Jina Reader API     │
-│  (any MCP client)│◀────│  (3 tools, async)     │◀────│  (free, JS rendering)│
+│  (any MCP client)│◀────│  (3 tools, cached)    │◀────│  (free, retry logic) │
 └──────────────────┘     └───────────────────────┘     └──────────────────────┘
 ```
 
-- **Search** — built-in keyword → URL index (300+ entries), case-insensitive matching
-- **Fetch** — Jina Reader (`r.jina.ai`) renders Oracle's JavaScript-heavy pages into clean markdown
-- **Modules** — direct links to all product family documentation home pages
+- **Search** — built-in keyword → URL index (300+ entries), case-insensitive matching.
+- **Fetch** — fetches clean markdown via Jina Reader, featuring:
+  - **Automatic Retries**: Exponential backoff (2s → 4s → 8s, up to 3 attempts) via `tenacity` on rate limits (HTTP 429), timeouts, and network issues.
+  - **In-Memory Caching**: 1-hour TTL, max 50 entries, session-scoped LRU cache to make repeated fetches instant.
+  - **Structured Logging**: Diagnostics, tool requests, cache stats, and retries are logged to stderr (captured by the MCP host).
+- **Modules** — direct links to all product family documentation home pages.
 
 ---
 
@@ -125,6 +128,7 @@ npx @modelcontextprotocol/inspector python server.py
 - **FastMCP** — high-level MCP server framework
 - **httpx** — async HTTP client
 - **Pydantic** — input validation
+- **tenacity** — retry library
 - **Jina Reader** — server-side rendering of Oracle docs
 
 ---
