@@ -20,3 +20,7 @@ desktop.ini
 
 # Testing
 .mcp-inspector/
+
+# Node
+node_modules/
+dist/

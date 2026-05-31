@@ -1,0 +1,38 @@
+{
+  "name": "oracle-fusion-docs-mcp",
+  "version": "3.0.0",
+  "description": "MCP server for instant search across Oracle Fusion Cloud documentation (HCM, ERP, EPM, SCM, CX, Projects). 300+ topics. Zero maintenance. Always up-to-date.",
+  "type": "module",
+  "bin": {
+    "oracle-fusion-docs-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "oracle",
+    "fusion",
+    "hcm",
+    "erp",
+    "epm",
+    "scm",
+    "mcp",
+    "documentation",
+    "ai-agent"
+  ],
+  "license": "MIT",
+  "author": "Simon Kreis-Richard",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "typescript": "^6.0.3"
+  }
+}
