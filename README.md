@@ -13,19 +13,19 @@
 ### Install & Run
 
 ```bash
-uvx oracle-fusion-docs-mcp
+npx oracle-fusion-docs-mcp
 ```
 
 ### Configure Your MCP Client
 
-Add to Claude Desktop, Cursor, VS Code, Hermes Agent, or any MCP-compatible client:
+Add to Claude Desktop, Cursor, VS Code, or any MCP-compatible client:
 
 ```json
 {
   "mcpServers": {
     "oracle-fusion-docs": {
-      "command": "uvx",
-      "args": ["oracle-fusion-docs-mcp"]
+      "command": "npx",
+      "args": ["-y", "oracle-fusion-docs-mcp"]
     }
   }
 }
@@ -96,8 +96,8 @@ This MCP server solves that:
 
 - **Search** — built-in keyword → URL index (300+ entries), case-insensitive matching.
 - **Fetch** — fetches clean markdown via Jina Reader, featuring:
-  - **Automatic Retries**: Exponential backoff (2s → 4s → 8s, up to 3 attempts) via `tenacity` on rate limits (HTTP 429), timeouts, and network issues.
-  - **In-Memory Caching**: 1-hour TTL, max 50 entries, session-scoped LRU cache to make repeated fetches instant.
+  - **Automatic Retries**: Exponential backoff (2s → 4s, up to 3 attempts) on rate limits (HTTP 429), timeouts, and network issues.
+  - **Two-Tier Caching**: In-memory LRU (1-hour TTL, 50 entries) backed by a persistent disk cache under `~/.cache/oracle-fusion-docs` (24-hour TTL, 200 entries) — repeated fetches stay instant across sessions.
   - **Structured Logging**: Diagnostics, tool requests, cache stats, and retries are logged to stderr (captured by the MCP host).
 - **Modules** — direct links to all product family documentation home pages.
 
@@ -108,27 +108,26 @@ This MCP server solves that:
 ```bash
 git clone https://github.com/SimonKreis-Richard/oracle-fusion-docs-mcp.git
 cd oracle-fusion-docs-mcp
-python -m venv .venv
-source .venv/bin/activate  # or .venv\Scripts\activate on Windows
-pip install -e .
-python server.py
+npm install
+npm run build
+npm start
 ```
 
 ### Testing with MCP Inspector
 
 ```bash
-npx @modelcontextprotocol/inspector python server.py
+npm run build
+npx @modelcontextprotocol/inspector node dist/index.js
 ```
 
 ---
 
 ## 🏗️ Tech Stack
 
-- **Python 3.10+** with `async`/`await`
-- **FastMCP** — high-level MCP server framework
-- **httpx** — async HTTP client
-- **Pydantic** — input validation
-- **tenacity** — retry library
+- **TypeScript** (ES2022, NodeNext modules)
+- **Node.js 18+** with native `fetch`
+- **@modelcontextprotocol/sdk** — official MCP server SDK
+- **Zod** — input validation
 - **Jina Reader** — server-side rendering of Oracle docs
 
 ---

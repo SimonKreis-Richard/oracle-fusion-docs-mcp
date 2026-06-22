@@ -1,11 +1,6 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
+# Node
+node_modules/
 dist/
-build/
-.venv/
-venv/
 
 # IDE
 .vscode/
@@ -20,7 +15,3 @@ desktop.ini
 
 # Testing
 .mcp-inspector/
-
-# Node
-node_modules/
-dist/

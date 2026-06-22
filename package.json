@@ -4,7 +4,18 @@
   "description": "MCP server for instant search across Oracle Fusion Cloud documentation (HCM, ERP, EPM, SCM, CX, Projects). 300+ topics. Zero maintenance. Always up-to-date.",
   "type": "module",
   "bin": {
-    "oracle-fusion-docs-mcp": "./dist/index.js"
+    "oracle-fusion-docs-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SimonKreis-Richard/oracle-fusion-docs-mcp.git"
+  },
+  "homepage": "https://github.com/SimonKreis-Richard/oracle-fusion-docs-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/SimonKreis-Richard/oracle-fusion-docs-mcp/issues"
   },
   "scripts": {
     "build": "tsc",
