@@ -525,16 +525,7 @@ class ResponseCache {
           const contentStr = fs.readFileSync(filepath, "utf-8");
           const data = JSON.parse(contentStr);
 
-          const timestamp = data.timestamp;
-          // Handle both seconds (Python) and milliseconds (JS) timestamps
-          let tsMs = timestamp;
-          if (timestamp < 100000000000) {
-            tsMs = timestamp * 1000;
-          }
-
-          const ttlMs = (data.ttl || 86400) * 1000;
-
-          if (now >= tsMs + ttlMs) {
+          if (now >= data.timestamp + data.ttl) {
             expiredEntries++;
             try { fs.unlinkSync(filepath); } catch {}
           } else {
@@ -561,14 +552,7 @@ class ResponseCache {
           const data = JSON.parse(contentStr);
           const url = data.url;
           const content = data.content;
-          const timestamp = data.timestamp;
-          let tsMs = timestamp;
-          if (timestamp < 100000000000) {
-            tsMs = timestamp * 1000;
-          }
-          const ttlMs = (data.ttl || 86400) * 1000;
-
-          const remainingDiskTtl = (tsMs + ttlMs) - now;
+          const remainingDiskTtl = (data.timestamp + data.ttl) - now;
           if (remainingDiskTtl > 0) {
             const inMemoryTtl = Math.min(this.ttlMs, remainingDiskTtl);
             const expiresAt = now + inMemoryTtl;
@@ -638,8 +622,8 @@ class ResponseCache {
       const data = {
         url,
         content,
-        timestamp: Date.now() / 1000, // stored in seconds for Python compatibility
-        ttl: this.diskTtlMs / 1000
+        timestamp: Date.now(),
+        ttl: this.diskTtlMs
       };
 
       fs.writeFileSync(filepath, JSON.stringify(data, null, 2), "utf-8");
@@ -675,15 +659,9 @@ class ResponseCache {
         try {
           const contentStr = fs.readFileSync(filepath, "utf-8");
           const data = JSON.parse(contentStr);
-          const timestamp = data.timestamp;
-          let tsMs = timestamp;
-          if (timestamp < 100000000000) {
-            tsMs = timestamp * 1000;
-          }
-          const ttlMs = (data.ttl || 86400) * 1000;
 
-          if (now < tsMs + ttlMs) {
-            const remainingDiskTtl = (tsMs + ttlMs) - now;
+          if (now < data.timestamp + data.ttl) {
+            const remainingDiskTtl = (data.timestamp + data.ttl) - now;
             const inMemoryTtl = Math.min(this.ttlMs, remainingDiskTtl);
             const expiresAt = now + inMemoryTtl;
             this.setMemory(url, data.content, expiresAt);
