@@ -743,11 +743,6 @@ class ResponseCache {
       diskSizeKb
     };
   }
-
-  // Helper for tests
-  public clearMemory(): void {
-    this.cache.clear();
-  }
 }
 
 const pageCache = new ResponseCache(50, 3600);
